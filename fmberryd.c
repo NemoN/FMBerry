@@ -1,7 +1,7 @@
 /*
 	FMBerry - an cheap and easy way of transmitting music with your Pi.
     Copyright (C) 2011-2013 by Tobias Mädel (t.maedel@alfeld.de)
-	Copyright (C) 2013      by Andrey Chilikin (achilikin@gmail.com)
+	Copyright (C) 2013      by Andrey Chilikin (https://github.com/achilikin)
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
@@ -107,7 +107,9 @@ int main(int argc, char **argv)
 		CFG_BOOL("poweron", 1, CFGF_NONE),    
 		CFG_BOOL("tcpbindlocal", 1, CFGF_NONE),  
 		CFG_INT("tcpport", 42516, CFGF_NONE),    
-		CFG_INT("txpower", 3, CFGF_NONE),    
+		CFG_INT("txpower", 3, CFGF_NONE),
+		CFG_BOOL("gain", 0, CFGF_NONE),
+		CFG_INT("volume", 3, CFGF_NONE),
 		CFG_INT("rdspin", 17, CFGF_NONE),
 		CFG_STR("rdsid", "", CFGF_NONE),
 		CFG_STR("rdstext", "", CFGF_NONE),
@@ -124,8 +126,8 @@ int main(int argc, char **argv)
 	ledpin = cfg_getint(cfg, "ledpin");
 	rdsint = cfg_getint(cfg, "rdspin");
 
-	// Init I2C bus and transmitter
-	if (ns741_init(cfg_getint(cfg, "i2cbus")) == -1)
+	// Init I2C bus and transmitter with initial frequency and state
+	if (ns741_init(cfg_getint(cfg, "i2cbus"), cfg_getint(cfg, "frequency")) == -1)
 	{
 		syslog(LOG_ERR, "Init failed! Double-check hardware and try again!\n");
 		exit(EXIT_FAILURE);
@@ -147,26 +149,20 @@ int main(int argc, char **argv)
 	mmr70.power     = cfg_getbool(cfg, "poweron");
 	mmr70.txpower   = cfg_getint(cfg, "txpower");
 	mmr70.mute      = 0;
+	mmr70.gain      = cfg_getbool(cfg, "gain");
+	mmr70.volume    = cfg_getint(cfg, "volume");
 	mmr70.stereo    = cfg_getbool(cfg, "stereo");
 	mmr70.rds       = cfg_getbool(cfg, "rdsenable");
 	strncpy(mmr70.rdsid, cfg_getstr(cfg, "rdsid"), 8);
 	strncpy(mmr70.rdstext, cfg_getstr(cfg, "rdstext"), 64);
 	
-	// Set initial frequency and state.
-	ns741_set_frequency(mmr70.frequency);
+	// apply configuration parameters
 	ns741_txpwr(mmr70.txpower);
-
-	if (mmr70.power)
-	{
-		ns741_power(1);
-	}
-	
-	if (!mmr70.stereo)
-		ns741_stereo(0);
-
+	ns741_mute(mmr70.mute);
+	ns741_stereo(mmr70.stereo);
 	ns741_rds_set_progname(mmr70.rdsid);
 	ns741_rds_set_radiotext(mmr70.rdstext);
-
+	ns741_power(mmr70.power);
 	// Use RPI_REV1 for earlier versions of Raspberry Pi
 	rpi_pin_init(RPI_REVISION);
 
@@ -182,12 +178,13 @@ int main(int argc, char **argv)
 		polls[1].fd = rds;
 		polls[1].events = POLLPRI;
 		nfds = 2;
-		ns741_rds(1);
 		if (ledpin > 0) {
 			rpi_pin_export(ledpin, RPI_OUTPUT);
 			rpi_pin_set(ledpin, led);
 		}
-		ns741_rds_start();
+
+		ns741_rds(1);
+		ns741_rds_isr(); // send first two bytes
 	}
 
 	// main polling loop
@@ -198,7 +195,7 @@ int main(int argc, char **argv)
 
 		if (polls[1].revents) {
 			rpi_pin_poll_clear(polls[1].fd);
-			ProcessRDS();
+			ns741_rds_isr();
 			// flash LED if enabled on every other RDS refresh cycle
 			if (ledpin > 0) {
 				ledcounter++;
@@ -333,7 +330,8 @@ int ProcessTCP(int sock, mmr70_data_t *pdata)
 		if (str_is(buffer, "poweron"))
 		{
 			ns741_power(1);
-			ns741_rds_start();
+			ns741_rds(1);
+			ns741_rds_reset_radiotext();
 			pdata->power = 1;
 			break;
 		}
@@ -349,6 +347,37 @@ int ProcessTCP(int sock, mmr70_data_t *pdata)
 		{
 			ns741_mute(0);
 			pdata->mute = 0;
+			break;
+		}
+
+		if (str_is(buffer, "gainlow"))
+		{
+			ns741_input_gain(1);
+			pdata->gain = 1;
+			break;
+		}
+
+		if (str_is(buffer, "gainoff"))
+		{
+			ns741_input_gain(0);
+			pdata->gain = 0;
+			break;
+		}
+
+		if (str_is_arg(buffer, "set volume", &arg))
+		{
+			int volume = atoi(arg);
+
+			if ((volume >= 0) && (volume <= 6))
+			{
+				syslog(LOG_NOTICE, "Changing volume level...\n");
+				ns741_volume(volume);
+				pdata->volume = volume;
+			}
+			else
+			{
+				syslog(LOG_NOTICE, "Bad volume level. Range 0-6\n");
+			}
 			break;
 		}
 
@@ -400,6 +429,7 @@ int ProcessTCP(int sock, mmr70_data_t *pdata)
 			strncpy(pdata->rdsid, arg, 8);
 			// ns741_rds_set_progname() will pad rdsid with spaces if needed
 			ns741_rds_set_progname(pdata->rdsid);
+			ns741_rds_reset_radiotext();
 			break;
 		}
 
@@ -413,11 +443,13 @@ int ProcessTCP(int sock, mmr70_data_t *pdata)
 		if (str_is(buffer, "status"))
 		{
 			bzero(buffer, sizeof(buffer));
-			sprintf(buffer, "freq: %dKHz txpwr: %.2fmW power: '%s' mute: '%s' stereo: '%s' rds: '%s' rdsid: '%s' rdstext: '%s'\n", 
+			sprintf(buffer, "freq: %dKHz txpwr: %.2fmW power: '%s' mute: '%s' gain: '%s' volume: '%d' stereo: '%s' rds: '%s' rdsid: '%s' rdstext: '%s'\n", 
 				pdata->frequency,
 				txpower[pdata->txpower],
 				pdata->power ? "on" : "off",
 				pdata->mute ? "on" : "off",
+				pdata->gain ? "on" : "off",
+				pdata->volume,
 				pdata->stereo ? "on" : "off",
 				pdata->rds ? "on" : "off",
 				pdata->rdsid, pdata->rdstext);

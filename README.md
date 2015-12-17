@@ -127,6 +127,9 @@ It currently allows the following commands:
 * ``ctlfmberry stereo off`` - Disables stereo signal
 * ``ctlfmberry muteon`` - Mute audio
 * ``ctlfmberry muteoff`` - Unmute audio
+* ``ctlfmberry gainlow`` - Audio gain -9dB
+* ``ctlfmberry gainoff`` - Audio gain 0dB"
+* ``ctlfmberry set volume 0-6`` Audio volume level 0 to 6, equal -9dB to +9db, 3dB step
 * ``ctlfmberry status`` - Print current status
 * ``ctlfmberry stop`` - Stop FMBerry daemon
 
@@ -149,7 +152,7 @@ You can then start FMBerry again with ```/etc/init.d/fmberry start```.
 ##Notes
 * WARNING! I am not a professional C programmer. Please expect this software to have major security flaws. Please don't expose it's control port to the internet! I'm fairly certain that this software is vulnerable to buffer overflows. 
 * If you are a C programmer, please help by securing this software and sending a pull request. 
-* The Daemon itself is essentially a simple TCP server. It is listening to Port 42516. (set in fmberryd.h) You can control it by sending the exact same commands you would give to ctlfmberry.
+* The Daemon itself is essentially a simple TCP server. It is listening to Port 42516. (set in fmberry.conf) You can control it by sending the exact same commands you would give to ctlfmberry.
 * For information on How to control the Daemon have a look into ctlfmberry. It's a simple shell script.
 
 * Feel free to contact me: t.maedel@alfeld.de (english and german) 
@@ -173,6 +176,23 @@ __I am getting compile errors.__
 
 Did you install all dependencies? (All lines with apt-get)
 
-__The transmissions dies after a couple of minutes.__
+__The transmission dies after a couple of minutes.__
 
 You didn't disable the internal processor of the MMR70. Do this by connecting TP18 to GND.
+
+__The power supply of the raspberry pi shorts out/there are no lights anymore___
+
+There is a short circuit. Probably caused by a wiring fault or by using an 80pin IDE cable for connecting the FMBerry.
+
+
+__Alternative linux distributions don't detect the I2C bus (ArchLinux, OpenWRT, OSMC)__
+
+Linux 3.18 introduced a new feature called Device Tree support. To get the I²C Bus working, you need to put this configuration at the end of /boot/config.txt (change the first parameter according to the RPi you have): 
+```
+device_tree=bcm2708-rpi-b-plus.dtb
+device_tree_param=i2c1=on
+device_tree_param=spi=on
+```
+
+
+Thanks to Daniel for the solution to that problem! 
